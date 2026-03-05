@@ -6,10 +6,12 @@ Changes are tagged: **[wrapper]** for Python/JS wrapper, **[binary]** for Chromi
 
 ---
 
-## [0.3.8] — 2026-03-05
+## [0.3.9] — 2026-03-05
 
 - **[binary]** Upgrade Chromium base to 145.0.7632.159 (Linux x64). macOS and Windows remain on 145.0.7632.109.2
 - **[binary]** WebGPU adapter spoofing for headless/Docker, timezone multi-context fix, stealth audit phase 2 (6 detection vector fixes), font auto-hide for cross-platform fingerprints
+- **[wrapper]** Deduplicate CLI flags when user args overlap with stealth defaults — user values win cleanly instead of passing both to Chromium
+- **[wrapper]** Extract shared `buildArgs` into `js/src/args.ts` (JS DRY fix), guard debug logging behind `DEBUG=cloakbrowser` env var
 
 ## [0.3.7] — 2026-03-05
 
