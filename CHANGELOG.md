@@ -6,6 +6,11 @@ Changes are tagged: **[wrapper]** for Python/JS wrapper, **[binary]** for Chromi
 
 ---
 
+## [0.3.8] — 2026-03-05
+
+- **[binary]** Upgrade Chromium base to 145.0.7632.159 (Linux x64). macOS and Windows remain on 145.0.7632.109.2
+- **[binary]** WebGPU adapter spoofing for headless/Docker, timezone multi-context fix, stealth audit phase 2 (6 detection vector fixes), font auto-hide for cross-platform fingerprints
+
 ## [0.3.7] — 2026-03-05
 
 - **[wrapper]** Unify timezone parameter: rename `timezone_id` to `timezone` in `launch_context()`, `launch_persistent_context()`, and `launch_persistent_context_async()` (Python). Old `timezone_id` still works with a deprecation warning. JS: deprecate `timezoneId` on `LaunchContextOptions` — use `timezone` (inherited from `LaunchOptions`)
