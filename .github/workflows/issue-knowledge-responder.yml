@@ -1,0 +1,148 @@
+name: Issue Knowledge Responder
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  respond:
+    if: github.event.issue.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      models: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Gather context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p /tmp/ctx
+
+          # 1. Read the full issue
+          gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json title,body,labels --jq '
+            "Title: " + .title + "\n\nBody:\n" + (.body // "No body") + "\n\nLabels: " + ([.labels[].name] | join(", "))
+          ' > /tmp/ctx/issue_body.txt
+
+          # 2. Extract keywords from title + body
+          TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json title --jq '.title')
+          BODY_TEXT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body --jq '.body // ""' | head -20)
+          STOPWORDS='^(the|a|an|is|in|on|at|to|for|of|with|and|or|not|bug|issue|error|problem|help|please|how|why|what|does|can|i|my|me|it|this|that|when|from|have|has|been|are|was|were|be|do|did|just|but|if|so|no|yes|all|any|some|like|get|got|use|using|used|try|tried|also|want|need|would|could|should|about|into|after|before|only|very|too|more|most|much|own|same|other|than|then|there|here|each|every|both|few|many|such|these|those|its|new|old|first|last|long|great|little|right|big|high|different|small|large|next|early|young|important|public|bad|same|able)$'
+          TITLE_KW=$(echo "$TITLE" | tr -cs 'a-zA-Z0-9' ' ' | tr ' ' '\n' | \
+            grep -v -i -E "$STOPWORDS" | head -5 | tr '\n' ' ')
+          BODY_KW=$(echo "$BODY_TEXT" | tr -cs 'a-zA-Z0-9' ' ' | tr ' ' '\n' | \
+            grep -v -i -E "$STOPWORDS" | sort | uniq -c | sort -rn | awk '{print $2}' | head -5 | tr '\n' ' ')
+
+          # 3. Search past issues — 5 strategies, deduplicated
+          # A: full title
+          gh issue list --repo "$REPO" --state all --search "$TITLE" --limit 10 \
+            --json number,title,state --jq '.[] | "#\(.number) — \(.title) (\(.state))"' \
+            2>/dev/null > /tmp/ctx/search_results.txt || true
+
+          # B: title keywords
+          gh issue list --repo "$REPO" --state all --search "$TITLE_KW" --limit 10 \
+            --json number,title,state --jq '.[] | "#\(.number) — \(.title) (\(.state))"' \
+            2>/dev/null >> /tmp/ctx/search_results.txt || true
+
+          # C: body keywords (most frequent terms from body)
+          if [ -n "$BODY_KW" ]; then
+            gh issue list --repo "$REPO" --state all --search "$BODY_KW" --limit 10 \
+              --json number,title,state --jq '.[] | "#\(.number) — \(.title) (\(.state))"' \
+              2>/dev/null >> /tmp/ctx/search_results.txt || true
+          fi
+
+          # D: search by labels if the new issue has any
+          LABELS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")')
+          if [ -n "$LABELS" ]; then
+            IFS=',' read -ra LABEL_ARR <<< "$LABELS"
+            for LBL in "${LABEL_ARR[@]}"; do
+              gh issue list --repo "$REPO" --state all --label "$LBL" --limit 10 \
+                --json number,title,state --jq '.[] | "#\(.number) — \(.title) (\(.state))"' \
+                2>/dev/null >> /tmp/ctx/search_results.txt || true
+            done
+          fi
+
+          # E: search for error messages / code snippets in body (first backtick block or quoted line)
+          ERROR_MSG=$(echo "$BODY_TEXT" | grep -oP '`[^`]{5,80}`' | head -1 | tr -d '`')
+          if [ -n "$ERROR_MSG" ]; then
+            gh issue list --repo "$REPO" --state all --search "$ERROR_MSG" --limit 5 \
+              --json number,title,state --jq '.[] | "#\(.number) — \(.title) (\(.state))"' \
+              2>/dev/null >> /tmp/ctx/search_results.txt || true
+          fi
+
+          # Deduplicate, exclude self, keep top 20
+          sort -u /tmp/ctx/search_results.txt | \
+            grep -v "^#${ISSUE_NUMBER} " | head -20 > /tmp/ctx/past_issues.txt
+
+          # 4. Read top 7 issue details (body + comments)
+          echo "" > /tmp/ctx/issue_details.txt
+          for NUM in $(grep -oP '#\K[0-9]+' /tmp/ctx/past_issues.txt | head -7); do
+            gh issue view "$NUM" --repo "$REPO" --json title,state,body,comments --jq '
+              "### #'"$NUM"' — " + .title + " (" + .state + ")\n" +
+              (.body // "")[:500] + "\n\nComments:\n" +
+              ([.comments[:3][] | .body[:300]] | join("\n---\n"))
+            ' >> /tmp/ctx/issue_details.txt 2>/dev/null || true
+            echo -e "\n---\n" >> /tmp/ctx/issue_details.txt
+          done
+
+          # 5. Read docs
+          head -200 README.md > /tmp/ctx/readme.txt 2>/dev/null || echo "No README" > /tmp/ctx/readme.txt
+          head -150 js/README.md > /tmp/ctx/js_readme.txt 2>/dev/null || echo "No JS README" > /tmp/ctx/js_readme.txt
+          head -100 CHANGELOG.md > /tmp/ctx/changelog.txt 2>/dev/null || echo "No CHANGELOG" > /tmp/ctx/changelog.txt
+
+          # Debug: show what we gathered
+          echo "=== Issue ===" && head -5 /tmp/ctx/issue_body.txt
+          echo "=== Past issues ===" && cat /tmp/ctx/past_issues.txt
+          echo "=== Keywords: $KEYWORDS ==="
+
+      - name: AI analysis
+        id: ai
+        uses: actions/ai-inference@v1
+        with:
+          prompt-file: .github/prompts/issue-responder.prompt.yml
+          file_input: |
+            issue_body: /tmp/ctx/issue_body.txt
+            past_issues: /tmp/ctx/past_issues.txt
+            issue_details: /tmp/ctx/issue_details.txt
+            readme: /tmp/ctx/readme.txt
+            js_readme: /tmp/ctx/js_readme.txt
+            changelog: /tmp/ctx/changelog.txt
+
+      - name: Parse and post
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RESPONSE=$(cat "${{ steps.ai.outputs.response-file }}")
+          echo "=== AI Response ==="
+          echo "$RESPONSE"
+
+          if echo "$RESPONSE" | grep -q "RESPOND: YES"; then
+            # Extract content between --- markers
+            COMMENT=$(echo "$RESPONSE" | sed -n '/^---$/,/^---$/p' | sed '1d;$d')
+
+            if [ -z "$COMMENT" ]; then
+              # Fallback: everything after "RESPOND: YES", strip --- lines
+              COMMENT=$(echo "$RESPONSE" | sed '1,/RESPOND: YES/d' | sed '/^---$/d')
+            fi
+
+            if [ -n "$COMMENT" ]; then
+              echo "$COMMENT" > /tmp/comment.txt
+              gh issue comment "${{ github.event.issue.number }}" \
+                --repo "${{ github.repository }}" \
+                --body-file /tmp/comment.txt
+              echo "✅ Comment posted"
+            else
+              echo "⚠️ RESPOND: YES but empty comment body, skipping"
+            fi
+          else
+            echo "ℹ️ No relevant resources found, staying silent"
+          fi
