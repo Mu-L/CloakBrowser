@@ -163,6 +163,7 @@ def launch(
     extension_paths: list[str] | None = None,
     license_key: str | None = None,
     browser_version: str | None = None,
+    _suppress_maximize: bool = False,
     **kwargs: Any,
 ) -> Any:
     """Launch stealth Chromium browser. Returns a Playwright Browser object.
@@ -207,11 +208,9 @@ def launch(
     timezone, locale, exit_ip = maybe_resolve_geoip(geoip, proxy, timezone, locale)
     proxy_kwargs, proxy_extra_args = _resolve_proxy_config(proxy, browser_version)
     args = _resolve_webrtc_args(args, proxy)
-    if exit_ip and not (args and any(a.startswith("--fingerprint-webrtc-ip") for a in args)):
-        args = list(args or [])
-        args.append(f"--fingerprint-webrtc-ip={exit_ip}")
+    args = _append_webrtc_exit_ip(args, exit_ip)
 
-    chrome_args = build_args(stealth_args, (args or []) + proxy_extra_args, timezone=timezone, locale=locale, headless=headless, extension_paths=extension_paths, start_maximized=binary_supports_maximized_window(license_key, browser_version))
+    chrome_args = build_args(stealth_args, (args or []) + proxy_extra_args, timezone=timezone, locale=locale, headless=headless, extension_paths=extension_paths, start_maximized=binary_supports_maximized_window(license_key, browser_version) and not _suppress_maximize)
     _maybe_warn_windows_fonts(chrome_args)
 
     logger.debug("Launching stealth Chromium (headless=%s, args=%d)", headless, len(chrome_args))
@@ -272,6 +271,7 @@ async def launch_async(  # noqa: C901
     extension_paths: list[str] | None = None,
     license_key: str | None = None,
     browser_version: str | None = None,
+    _suppress_maximize: bool = False,
     **kwargs: Any,
 ) -> Any:
     """Async version of launch(). Returns a Playwright Browser object.
@@ -314,10 +314,8 @@ async def launch_async(  # noqa: C901
     timezone, locale, exit_ip = maybe_resolve_geoip(geoip, proxy, timezone, locale)
     proxy_kwargs, proxy_extra_args = _resolve_proxy_config(proxy, browser_version)
     args = _resolve_webrtc_args(args, proxy)
-    if exit_ip and not (args and any(a.startswith("--fingerprint-webrtc-ip") for a in args)):
-        args = list(args or [])
-        args.append(f"--fingerprint-webrtc-ip={exit_ip}")
-    chrome_args = build_args(stealth_args, (args or []) + proxy_extra_args, timezone=timezone, locale=locale, headless=headless, extension_paths=extension_paths, start_maximized=binary_supports_maximized_window(license_key, browser_version))
+    args = _append_webrtc_exit_ip(args, exit_ip)
+    chrome_args = build_args(stealth_args, (args or []) + proxy_extra_args, timezone=timezone, locale=locale, headless=headless, extension_paths=extension_paths, start_maximized=binary_supports_maximized_window(license_key, browser_version) and not _suppress_maximize)
     _maybe_warn_windows_fonts(chrome_args)
 
     logger.debug("Launching stealth Chromium async (headless=%s, args=%d)", headless, len(chrome_args))
@@ -432,9 +430,7 @@ def launch_persistent_context(
     timezone, locale, exit_ip = maybe_resolve_geoip(geoip, proxy, timezone, locale)
     proxy_kwargs, proxy_extra_args = _resolve_proxy_config(proxy, browser_version)
     args = _resolve_webrtc_args(args, proxy)
-    if exit_ip and not (args and any(a.startswith("--fingerprint-webrtc-ip") for a in args)):
-        args = list(args or [])
-        args.append(f"--fingerprint-webrtc-ip={exit_ip}")
+    args = _append_webrtc_exit_ip(args, exit_ip)
     chrome_args = build_args(stealth_args, (args or []) + proxy_extra_args, timezone=timezone, locale=locale, headless=headless, extension_paths=extension_paths, start_maximized=binary_supports_maximized_window(license_key, browser_version) and viewport is _VIEWPORT_UNSET and "viewport" not in kwargs and "no_viewport" not in kwargs)
     _maybe_warn_windows_fonts(chrome_args)
 
@@ -571,9 +567,7 @@ async def launch_persistent_context_async(
     timezone, locale, exit_ip = maybe_resolve_geoip(geoip, proxy, timezone, locale)
     proxy_kwargs, proxy_extra_args = _resolve_proxy_config(proxy, browser_version)
     args = _resolve_webrtc_args(args, proxy)
-    if exit_ip and not (args and any(a.startswith("--fingerprint-webrtc-ip") for a in args)):
-        args = list(args or [])
-        args.append(f"--fingerprint-webrtc-ip={exit_ip}")
+    args = _append_webrtc_exit_ip(args, exit_ip)
     chrome_args = build_args(stealth_args, (args or []) + proxy_extra_args, timezone=timezone, locale=locale, headless=headless, extension_paths=extension_paths, start_maximized=binary_supports_maximized_window(license_key, browser_version) and viewport is _VIEWPORT_UNSET and "viewport" not in kwargs and "no_viewport" not in kwargs)
     _maybe_warn_windows_fonts(chrome_args)
 
@@ -692,15 +686,16 @@ def launch_context(
     # resolved values flow to binary flags
     timezone, locale, exit_ip = maybe_resolve_geoip(geoip, proxy, timezone, locale)
     # Inject geoip exit IP for WebRTC spoofing (free — no extra HTTP call)
-    if exit_ip and not (args and any(a.startswith("--fingerprint-webrtc-ip") for a in args)):
-        args = list(args or [])
-        args.append(f"--fingerprint-webrtc-ip={exit_ip}")
+    args = _append_webrtc_exit_ip(args, exit_ip)
     # --fingerprint-timezone is process-wide (reads CommandLine in renderer),
     # so it applies to ALL contexts, not just the default one.
     # locale and timezone are set via binary flags only — no CDP emulation.
     browser = launch(headless=headless, proxy=proxy, args=args, stealth_args=stealth_args,
                      timezone=timezone, locale=locale, extension_paths=extension_paths,
-                     license_key=license_key, browser_version=browser_version)
+                     license_key=license_key, browser_version=browser_version,
+                     # Caller chose a viewport geometry → don't also auto-maximize
+                     # the window (mirrors the persistent-context path + JS).
+                     _suppress_maximize=(viewport is not _VIEWPORT_UNSET or "no_viewport" in kwargs))
 
     context_kwargs: dict[str, Any] = {}
     if user_agent:
@@ -815,15 +810,16 @@ async def launch_context_async(
     # Resolve geoip BEFORE launch_async() to avoid double-resolution and ensure
     # resolved values flow to binary flags
     timezone, locale, exit_ip = maybe_resolve_geoip(geoip, proxy, timezone, locale)
-    if exit_ip and not (args and any(a.startswith("--fingerprint-webrtc-ip") for a in args)):
-        args = list(args or [])
-        args.append(f"--fingerprint-webrtc-ip={exit_ip}")
+    args = _append_webrtc_exit_ip(args, exit_ip)
     # --fingerprint-timezone is process-wide (reads CommandLine in renderer),
     # so it applies to ALL contexts, not just the default one.
     # locale and timezone are set via binary flags only — no CDP emulation.
     browser = await launch_async(headless=headless, proxy=proxy, args=args, stealth_args=stealth_args,
                                  timezone=timezone, locale=locale, extension_paths=extension_paths,
-                                 license_key=license_key, browser_version=browser_version)
+                                 license_key=license_key, browser_version=browser_version,
+                                 # Caller chose a viewport geometry → don't also auto-maximize
+                                 # the window (mirrors the persistent-context path + JS).
+                                 _suppress_maximize=(viewport is not _VIEWPORT_UNSET or "no_viewport" in kwargs))
 
     context_kwargs: dict[str, Any] = {}
     if user_agent:
@@ -1019,9 +1015,11 @@ def maybe_resolve_geoip(
     # None when no proxy → echo services resolve the machine's own public IP
     proxy_url = _extract_proxy_url(proxy) if proxy else None
 
-    # When both tz/locale are explicit, still resolve exit IP for WebRTC
+    # When both tz/locale are explicit, resolve the exit IP for WebRTC — but only
+    # with a proxy. With no proxy the WebRTC IP would just be the real connection
+    # IP the site already sees (a no-op), so skip the third-party echo call.
     if timezone is not None and locale is not None:
-        exit_ip = resolve_proxy_exit_ip(proxy_url)
+        exit_ip = resolve_proxy_exit_ip(proxy_url) if proxy_url else None
         return timezone, locale, exit_ip
 
     geo_tz, geo_locale, exit_ip = resolve_proxy_geo_with_ip(proxy_url)
@@ -1070,6 +1068,21 @@ def _resolve_webrtc_args(
         logger.warning("Could not resolve proxy exit IP for WebRTC spoofing; removing --fingerprint-webrtc-ip=auto")
         args = list(args)
         del args[idx]
+    return args
+
+
+def _append_webrtc_exit_ip(
+    args: list[str] | None, exit_ip: str | None
+) -> list[str] | None:
+    """Append ``--fingerprint-webrtc-ip=<exit_ip>`` unless the user already set it.
+
+    *exit_ip* comes free from the geoip lookup; it spoofs the WebRTC IP to the
+    egress IP. No-op when there is no exit IP or the flag is already present. This
+    rule must stay identical across every launch path, so it lives in one place.
+    """
+    if exit_ip and not (args and any(a.startswith("--fingerprint-webrtc-ip") for a in args)):
+        args = list(args or [])
+        args.append(f"--fingerprint-webrtc-ip={exit_ip}")
     return args
 
 

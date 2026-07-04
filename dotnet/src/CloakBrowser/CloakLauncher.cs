@@ -33,7 +33,8 @@ public static class CloakLauncher
         var combined = new List<string>(args ?? new List<string>());
         combined.AddRange(proxyResolution.ExtraArgs);
         var chromeArgs = BuildArgs(options.StealthArgs, combined, timezone, locale, options.Headless, options.ExtensionPaths,
-            startMaximized: Config.BinarySupportsMaximizedWindow(options.LicenseKey, options.BrowserVersion));
+            startMaximized: Config.BinarySupportsMaximizedWindow(options.LicenseKey, options.BrowserVersion)
+                && !options.SuppressMaximize);
         MaybeWarnWindowsFonts(chromeArgs);
 
         CloakLog.Debug($"Launching stealth Chromium (headless={options.Headless}, args={chromeArgs.Count})");
@@ -97,6 +98,9 @@ public static class CloakLauncher
             BrowserVersion = options.BrowserVersion,
             // geoip already resolved above; don't re-resolve.
             GeoIp = false,
+            // Caller chose a viewport geometry → don't also auto-maximize the
+            // window (mirrors the persistent-context path + Python/JS).
+            SuppressMaximize = options.Viewport != null || options.NoViewport,
         }).ConfigureAwait(false);
 
         try
@@ -196,10 +200,14 @@ public static class CloakLauncher
         // null when no proxy -> echo services resolve the machine's own public IP.
         string? proxyUrl = proxy != null ? ProxyResolver.ExtractProxyUrl(proxy) : null;
 
-        // When both tz/locale are explicit, still resolve the exit IP for WebRTC.
+        // When both tz/locale are explicit, resolve the exit IP for WebRTC — but only
+        // with a proxy. With no proxy the WebRTC IP would just be the real connection
+        // IP the site already sees (a no-op), so skip the third-party echo call.
         if (timezone != null && locale != null)
         {
-            string? exitIpOnly = await GeoIp.ResolveProxyExitIpAsync(proxyUrl).ConfigureAwait(false);
+            string? exitIpOnly = proxyUrl != null
+                ? await GeoIp.ResolveProxyExitIpAsync(proxyUrl).ConfigureAwait(false)
+                : null;
             return (timezone, locale, exitIpOnly);
         }
 

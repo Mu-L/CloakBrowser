@@ -93,15 +93,18 @@ public static class GeoIp
     public static async Task<(string? Timezone, string? Locale, string? ExitIp)> ResolveProxyGeoWithIpAsync(
         string? proxyUrl, CancellationToken ct = default)
     {
+        // Ensure the DB first - the download must NOT be bounded by the resolution
+        // timeout (a first-use ~70MB fetch legitimately outlasts it).
         var dbPath = await EnsureGeoIpDbAsync(ct).ConfigureAwait(false);
-        if (dbPath == null)
-            return (null, null, null);
 
         var timeout = GetGeoIpTimeoutSeconds();
         var deadline = DeadlineFromTimeout(timeout);
 
         // Exit IP (through proxy, or the machine's own public IP when proxyUrl is
-        // null/empty) is most accurate - gateway DNS may differ from exit.
+        // null/empty) is most accurate - gateway DNS may differ from exit. Resolved
+        // even when the DB is unavailable: the IP does not need the DB, and dropping
+        // it on a DB hiccup would let WebRTC fall back to the real IP behind a proxy
+        // while the connection shows the proxy IP - a real deanonymization.
         var ip = await ResolveExitIpAsync(proxyUrl, RemainingSeconds(deadline), ct).ConfigureAwait(false);
         // Hostname fallback only applies to a proxy; no proxy -> echo services only.
         if (ip == null && !string.IsNullOrEmpty(proxyUrl) && !DeadlineExpired(deadline))
@@ -112,6 +115,10 @@ public static class GeoIp
                 CloakLog.Warning("GeoIP resolution timed out after {0:0.0}s; continuing without GeoIP", timeout);
             return (null, null, null);
         }
+
+        // DB only drives tz/locale; a missing/failed DB still returns the exit IP.
+        if (dbPath == null)
+            return (null, null, ip);
 
         try
         {

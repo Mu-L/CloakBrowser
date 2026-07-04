@@ -105,15 +105,18 @@ def resolve_proxy_geo_with_ip(
             "  pip install cloakbrowser[geoip]"
         ) from None
 
+    # Ensure the DB first — the download must NOT be bounded by the resolution
+    # timeout (a first-use ~70MB fetch legitimately outlasts it).
     db_path = _ensure_geoip_db()
-    if db_path is None:
-        return None, None, None
 
     timeout = _get_geoip_timeout_seconds()
     deadline = _deadline_from_timeout(timeout)
 
     # Exit IP (through proxy, or the machine's own public IP when proxy_url is
-    # falsy) is most accurate — gateway DNS may differ from exit
+    # falsy) is most accurate — gateway DNS may differ from exit. Resolved even
+    # when the DB is unavailable: the IP does not need the DB, and dropping it on
+    # a DB hiccup would let WebRTC fall back to the real IP behind a proxy while
+    # the connection shows the proxy IP — a real deanonymization.
     ip = _resolve_exit_ip(proxy_url, timeout=_remaining_seconds(deadline))
     # Hostname fallback only applies to a proxy; no proxy → echo services only
     if ip is None and proxy_url and not _deadline_expired(deadline):
@@ -122,6 +125,10 @@ def resolve_proxy_geo_with_ip(
         if deadline is not None and _deadline_expired(deadline):
             logger.warning("GeoIP resolution timed out after %.1fs; continuing without GeoIP", timeout)
         return None, None, None
+
+    # DB only drives tz/locale; a missing/failed DB still returns the exit IP.
+    if db_path is None:
+        return None, None, ip
 
     try:
         with geoip2.database.Reader(str(db_path)) as reader:
